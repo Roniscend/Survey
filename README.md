@@ -17,3 +17,12 @@ Features
 🗃️ Safe file access via Android FileProvider for modern Android versions.
 
 🎨 Built fully with Jetpack Compose for a modern UI.
+
+
+https://github.com/user-attachments/assets/334d789c-005b-47ea-9ec7-4f95a7b64c6a
+
+
+
+https://github.com/user-attachments/assets/48512b30-6b96-4e02-b6b1-d7840a230edf
+
+
