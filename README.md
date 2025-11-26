@@ -18,11 +18,12 @@ Features
 
 🎨 Built fully with Jetpack Compose for a modern UI.
 
-
-https://github.com/user-attachments/assets/334d789c-005b-47ea-9ec7-4f95a7b64c6a
-
+https://github.com/user-attachments/assets/d4d51d03-2d3a-44ca-baba-ddf6371dfecc
 
 
-https://github.com/user-attachments/assets/48512b30-6b96-4e02-b6b1-d7840a230edf
+
+https://github.com/user-attachments/assets/5b39c03c-2ace-41e5-957c-4308b748507f
+
+
 
 
