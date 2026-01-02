@@ -11,8 +11,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -25,6 +23,7 @@ import com.example.survey.utils.LocationHelper
 import com.example.survey.viewmodel.CameraViewModel
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
@@ -35,6 +34,8 @@ fun CameraScreen(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+
+    val scope = rememberCoroutineScope()
 
     val uiState by viewModel.uiState
     val capturedMedia = viewModel.capturedMedia
@@ -55,6 +56,12 @@ fun CameraScreen(
     var cameraController by remember { mutableStateOf<CameraController?>(null) }
     var isRecording by remember { mutableStateOf(false) }
     val locationHelper = remember { LocationHelper(context) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            cameraController?.shutdown()
+        }
+    }
 
     if (!permissionsState.allPermissionsGranted) {
         Column(
@@ -142,7 +149,7 @@ fun CameraScreen(
 
             IconButton(
                 onClick = {
-                    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+                    scope.launch {
                         val (coordinates, detailedAddress) = locationHelper.getCurrentLocationAndAddress()
 
                         cameraController?.capturePhoto(
@@ -173,7 +180,7 @@ fun CameraScreen(
             IconButton(
                 onClick = {
                     if (!isRecording) {
-                        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+                        scope.launch {
                             val (coordinates, detailedAddress) = locationHelper.getCurrentLocationAndAddress()
 
                             val started = cameraController?.startVideoRecording(

@@ -2,32 +2,30 @@ package com.example.survey.utils
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.*
+import android.media.AudioManager
+import android.media.MediaActionSound
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Environment
 import android.util.Log
+import android.view.Surface
+import android.view.WindowManager
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.*
+import androidx.camera.video.Recorder
+import androidx.camera.video.VideoCapture
 import androidx.core.content.ContextCompat
+import androidx.exifinterface.media.ExifInterface
 import androidx.lifecycle.LifecycleOwner
 import com.example.survey.data.MediaItem
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.*
 import java.io.File
 import java.io.FileOutputStream
-import androidx.camera.core.Camera as CameraXCamera
-import androidx.exifinterface.media.ExifInterface
-import android.view.Surface
-import android.view.WindowManager
-import android.media.MediaActionSound
-import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.Executors
-import android.content.res.Configuration
+import androidx.camera.core.Camera as CameraXCamera
 
 class CameraController(
     private val context: Context,
@@ -53,6 +51,7 @@ class CameraController(
     init {
         try {
             mediaActionSound = MediaActionSound()
+            mediaActionSound?.load(MediaActionSound.SHUTTER_CLICK)
         } catch (e: Exception) {
             Log.w(TAG, "MediaActionSound init failed", e)
         }
@@ -62,7 +61,12 @@ class CameraController(
         try {
             mediaActionSound?.play(MediaActionSound.SHUTTER_CLICK)
         } catch (e: Exception) {
-            Log.w(TAG, "Shutter sound failed", e)
+            try {
+                val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                audioManager.playSoundEffect(AudioManager.FX_KEY_CLICK)
+            } catch (fallbackEx: Exception) {
+                Log.e(TAG, "Failed to play any shutter sound", fallbackEx)
+            }
         }
     }
 
@@ -165,14 +169,12 @@ class CameraController(
         val deviceOrientation = context.resources.configuration.orientation
         val isDeviceInLandscape = (deviceOrientation == Configuration.ORIENTATION_LANDSCAPE)
 
-        Log.d(TAG, "Capturing photo - Device configuration.orientation: ${if (isDeviceInLandscape) "LANDSCAPE" else "PORTRAIT"}")
+        Log.d(TAG, "Capturing photo - Config Orientation: ${if (isDeviceInLandscape) "LANDSCAPE" else "PORTRAIT"}")
 
         imageCapture.targetRotation = getDisplayRotation()
 
         val sessionDir = createSessionFolder(sessionName)
         val photoFile = File(sessionDir, "IMG_${System.currentTimeMillis()}.jpg")
-
-        Log.d(TAG, "Capturing photo to: ${photoFile.absolutePath}")
 
         val outputFileOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
 
@@ -189,7 +191,6 @@ class CameraController(
                                 val locationHelper = LocationHelper(context)
                                 locationHelper.getCurrentLocationAndAddress()
                             }
-
                             val (coordinates, detailedAddress) = locationResult ?: (Pair(0.0, 0.0) to location)
 
                             if (coordinates.first != 0.0 && coordinates.second != 0.0) {
@@ -216,12 +217,10 @@ class CameraController(
                             )
 
                             withContext(Dispatchers.Main) {
-                                Log.d(TAG, "MediaItem ready: ${overlayFile.name}")
                                 onSuccess(mediaItem)
                             }
                         } catch (e: Exception) {
                             Log.e(TAG, "Error processing saved image", e)
-
                             try {
                                 val overlayFile = addOverlayToImage(
                                     photoFile,
@@ -231,7 +230,6 @@ class CameraController(
                                     isDeviceInLandscape
                                 )
                                 triggerEnhancedMediaScan(overlayFile)
-
                                 val mediaItem = MediaItem(
                                     uri = Uri.fromFile(overlayFile),
                                     file = overlayFile,
@@ -240,69 +238,232 @@ class CameraController(
                                     location = location,
                                     sessionName = sessionName
                                 )
-
-                                withContext(Dispatchers.Main) {
-                                    onSuccess(mediaItem)
-                                }
+                                withContext(Dispatchers.Main) { onSuccess(mediaItem) }
                             } catch (fallbackError: Exception) {
-                                Log.e(TAG, "Fallback processing failed", fallbackError)
-                                withContext(Dispatchers.Main) {
-                                    onError(fallbackError)
-                                }
+                                withContext(Dispatchers.Main) { onError(fallbackError) }
                             }
                         }
                     }
                 }
 
                 override fun onError(exception: ImageCaptureException) {
-                    Log.e(TAG, "Photo capture failed", exception)
-                    CoroutineScope(Dispatchers.Main).launch {
-                        onError(exception)
-                    }
+                    CoroutineScope(Dispatchers.Main).launch { onError(exception) }
                 }
             }
         )
+    }
+
+    private fun addOverlayToImage(
+        originalFile: File,
+        sessionName: String,
+        timestamp: String,
+        location: String,
+        isDeviceInLandscape: Boolean
+    ): File {
+        return try {
+            val rawBitmap = BitmapFactory.decodeFile(originalFile.absolutePath)
+                ?: throw Exception("Failed to decode image file")
+
+            val exif = ExifInterface(originalFile.absolutePath)
+            val orientation = exif.getAttributeInt(
+                ExifInterface.TAG_ORIENTATION,
+                ExifInterface.ORIENTATION_NORMAL
+            )
+
+            val rotatedBitmap = rotateBitmap(rawBitmap, orientation)
+
+            val finalBitmap = if (isDeviceInLandscape && rotatedBitmap.width < rotatedBitmap.height) {
+                rotateBitmap(rotatedBitmap, ExifInterface.ORIENTATION_ROTATE_90)
+            } else if (!isDeviceInLandscape && rotatedBitmap.width > rotatedBitmap.height) {
+                rotateBitmap(rotatedBitmap, ExifInterface.ORIENTATION_ROTATE_90)
+            } else {
+                rotatedBitmap
+            }
+
+            if (rotatedBitmap != finalBitmap && rotatedBitmap != rawBitmap) {
+                rotatedBitmap.recycle()
+            }
+            if (rawBitmap != finalBitmap && rawBitmap != rotatedBitmap) {
+
+            }
+
+            val mutableBitmap = finalBitmap.copy(Bitmap.Config.ARGB_8888, true)
+            val canvas = Canvas(mutableBitmap)
+
+            val paint = Paint().apply {
+                color = Color.WHITE
+                textSize = 36f
+                isAntiAlias = true
+                isDither = true
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                style = Paint.Style.FILL_AND_STROKE
+                strokeWidth = 1f
+                setShadowLayer(4f, 2f, 2f, Color.BLACK)
+            }
+
+            if (isDeviceInLandscape) {
+                val sideMargin = 40f
+                val centerY = mutableBitmap.height / 2f
+
+                canvas.save()
+                canvas.translate(sideMargin, centerY)
+                canvas.rotate(-90f)
+                val timestampBounds = Rect()
+                paint.getTextBounds(timestamp, 0, timestamp.length, timestampBounds)
+                canvas.drawText(timestamp, -timestampBounds.width() / 2f, 0f, paint)
+                canvas.restore()
+
+                canvas.save()
+                canvas.translate(mutableBitmap.width - sideMargin, centerY)
+                canvas.rotate(90f)
+                val sessionBounds = Rect()
+                paint.getTextBounds(sessionName, 0, sessionName.length, sessionBounds)
+                canvas.drawText(sessionName, -sessionBounds.width() / 2f, 0f, paint)
+                canvas.restore()
+
+                val maxLineWidth = mutableBitmap.height - 160f
+                val locationLines = wrapText(location, paint, maxLineWidth)
+
+                canvas.save()
+                canvas.translate(mutableBitmap.width - sideMargin - 20f, mutableBitmap.height - 80f)
+                canvas.rotate(90f)
+                var currentY = 0f
+                locationLines.reversed().forEach { line ->
+                    canvas.drawText(line, 0f, currentY, paint)
+                    currentY -= (paint.textSize + 6f)
+                }
+                canvas.restore()
+
+            } else {
+                val maxLineWidth = mutableBitmap.width - 60f
+                val locationLines = wrapText(location, paint, maxLineWidth)
+
+                canvas.drawText(timestamp, 20f, 50f, paint)
+
+                val sessionNameBounds = Rect()
+                paint.getTextBounds(sessionName, 0, sessionName.length, sessionNameBounds)
+                val sessionNameX = mutableBitmap.width - sessionNameBounds.width() - 20f
+                canvas.drawText(sessionName, sessionNameX, 50f, paint)
+
+                val lineSpacing = 6f
+                val totalLocationHeight = locationLines.size * (paint.textSize + lineSpacing)
+                var currentY = mutableBitmap.height - totalLocationHeight - 15f
+
+                locationLines.forEach { line ->
+                    val lineBounds = Rect()
+                    paint.getTextBounds(line, 0, line.length, lineBounds)
+                    val lineX = (mutableBitmap.width - lineBounds.width()) / 2f
+                    canvas.drawText(line, lineX, currentY, paint)
+                    currentY += paint.textSize + lineSpacing
+                }
+            }
+
+            val overlayFile = File(
+                originalFile.parent,
+                "IMG_${System.currentTimeMillis()}_watermarked.jpg"
+            )
+
+            FileOutputStream(overlayFile).use { out ->
+                mutableBitmap.compress(Bitmap.CompressFormat.JPEG, 95, out)
+            }
+
+            try {
+                val dstExif = ExifInterface(overlayFile.absolutePath)
+                dstExif.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
+
+                val srcExif = ExifInterface(originalFile.absolutePath)
+                val dateTags = arrayOf(
+                    ExifInterface.TAG_DATETIME,
+                    ExifInterface.TAG_DATETIME_ORIGINAL
+                )
+                dateTags.forEach { tag ->
+                    srcExif.getAttribute(tag)?.let { dstExif.setAttribute(tag, it) }
+                }
+                srcExif.latLong?.let { ll ->
+                    dstExif.setLatLong(ll[0], ll[1])
+                }
+                dstExif.saveAttributes()
+            } catch (ex: Exception) {
+                Log.w(TAG, "Failed to copy EXIF", ex)
+            }
+
+            if (originalFile != overlayFile && originalFile.exists()) {
+                originalFile.delete()
+            }
+            if (rawBitmap != finalBitmap) rawBitmap.recycle()
+            if (rotatedBitmap != finalBitmap && rotatedBitmap != rawBitmap) rotatedBitmap.recycle()
+
+            return overlayFile
+        } catch (e: Exception) {
+            Log.e(TAG, "Error adding overlay", e)
+            return originalFile
+        }
+    }
+
+    private fun rotateBitmap(bitmap: Bitmap, orientation: Int): Bitmap {
+        val matrix = Matrix()
+        when (orientation) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+            ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+            else -> return bitmap
+        }
+        return try {
+            Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+        } catch (e: OutOfMemoryError) {
+            Log.e(TAG, "OOM rotating bitmap", e)
+            bitmap
+        }
     }
 
     private fun saveLocationToExif(photoFile: File, latitude: Double, longitude: Double) {
         try {
             if (photoFile.exists() && latitude != 0.0 && longitude != 0.0) {
                 val exif = ExifInterface(photoFile.absolutePath)
-
-                val existingLatLng = exif.latLong
-                if (existingLatLng == null || (existingLatLng[0] == 0.0 && existingLatLng[1] == 0.0)) {
-                    exif.setLatLong(latitude, longitude)
-                    exif.saveAttributes()
-                    Log.d(TAG, "EXIF location saved: $latitude, $longitude")
-                }
+                exif.setLatLong(latitude, longitude)
+                exif.saveAttributes()
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error saving EXIF location", e)
-            e.printStackTrace()
         }
     }
 
     private fun triggerEnhancedMediaScan(file: File) {
         try {
-            Log.d(TAG, "Triggering media scan for: ${file.absolutePath}")
-
             MediaScannerConnection.scanFile(
                 context,
                 arrayOf(file.absolutePath),
                 arrayOf("image/jpeg", "video/mp4")
-            ) { path, uri ->
-                Log.d(TAG, "Media scanned successfully: $path -> $uri")
-            }
-
-            val intent = Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE).apply {
-                data = Uri.fromFile(file)
-            }
-            context.sendBroadcast(intent)
-
+            ) { _, _ -> }
         } catch (e: Exception) {
             Log.e(TAG, "Error during media scan", e)
-            e.printStackTrace()
         }
+    }
+
+    private fun wrapText(text: String, paint: Paint, maxWidth: Float): List<String> {
+        val words = text.split(" ")
+        val lines = mutableListOf<String>()
+        var currentLine = ""
+
+        for (word in words) {
+            val testLine = if (currentLine.isEmpty()) word else "$currentLine $word"
+            val testWidth = paint.measureText(testLine)
+
+            if (testWidth <= maxWidth) {
+                currentLine = testLine
+            } else {
+                if (currentLine.isNotEmpty()) {
+                    lines.add(currentLine)
+                    currentLine = word
+                } else {
+                    lines.add(word)
+                }
+            }
+        }
+        if (currentLine.isNotEmpty()) {
+            lines.add(currentLine)
+        }
+        return lines.ifEmpty { listOf(text) }
     }
 
     @SuppressLint("MissingPermission")
@@ -386,198 +547,6 @@ class CameraController(
         return currentRecording != null
     }
 
-    private fun addOverlayToImage(
-        originalFile: File,
-        sessionName: String,
-        timestamp: String,
-        location: String,
-        isDeviceInLandscape: Boolean
-    ): File {
-        return try {
-            val rawBitmap = BitmapFactory.decodeFile(originalFile.absolutePath)
-                ?: throw Exception("Failed to decode image file")
-
-            val isBitmapLandscape = rawBitmap.width > rawBitmap.height
-            val shouldUseLandscapeLayout = isDeviceInLandscape && isBitmapLandscape
-
-            Log.d(TAG, "==========================================")
-            Log.d(TAG, "WATERMARK ORIENTATION DEBUG: ${originalFile.name}")
-            Log.d(TAG, "Device orientation (config): ${if (isDeviceInLandscape) "LANDSCAPE" else "PORTRAIT"}")
-            Log.d(TAG, "Bitmap dimensions: ${rawBitmap.width} x ${rawBitmap.height}")
-            Log.d(TAG, "Bitmap shape: ${if (isBitmapLandscape) "LANDSCAPE" else "PORTRAIT"}")
-            Log.d(TAG, "Final watermark layout: ${if (shouldUseLandscapeLayout) "LANDSCAPE" else "PORTRAIT"}")
-            Log.d(TAG, "==========================================")
-
-            val mutableBitmap = rawBitmap.copy(Bitmap.Config.ARGB_8888, true)
-            val canvas = Canvas(mutableBitmap)
-
-            val paint = Paint().apply {
-                color = Color.WHITE
-                textSize = 36f
-                isAntiAlias = true
-                isDither = true
-                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-                style = Paint.Style.FILL_AND_STROKE
-                strokeWidth = 1f
-                setShadowLayer(4f, 2f, 2f, Color.BLACK)
-            }
-
-            if (shouldUseLandscapeLayout) {
-                Log.d(TAG, "Applying LANDSCAPE watermark")
-
-                val sideMargin = 40f
-                val centerY = mutableBitmap.height / 2f
-
-                canvas.save()
-                canvas.translate(sideMargin, centerY)
-                canvas.rotate(-90f)
-                val timestampBounds = Rect()
-                paint.getTextBounds(timestamp, 0, timestamp.length, timestampBounds)
-                canvas.drawText(timestamp, -timestampBounds.width() / 2f, 0f, paint)
-                canvas.restore()
-
-                canvas.save()
-                canvas.translate(mutableBitmap.width - sideMargin, centerY)
-                canvas.rotate(90f)
-                val sessionBounds = Rect()
-                paint.getTextBounds(sessionName, 0, sessionName.length, sessionBounds)
-                canvas.drawText(sessionName, -sessionBounds.width() / 2f, 0f, paint)
-                canvas.restore()
-
-                val maxLineWidth = mutableBitmap.height - 160f
-                val locationLines = wrapText(location, paint, maxLineWidth)
-
-                canvas.save()
-                canvas.translate(mutableBitmap.width - sideMargin - 20f, mutableBitmap.height - 80f)
-                canvas.rotate(90f)
-                var currentY = 0f
-                locationLines.reversed().forEach { line ->
-                    canvas.drawText(line, 0f, currentY, paint)
-                    currentY -= (paint.textSize + 6f)
-                }
-                canvas.restore()
-
-            } else {
-                Log.d(TAG, "Applying PORTRAIT watermark")
-                val maxLineWidth = mutableBitmap.width - 60f
-                val locationLines = wrapText(location, paint, maxLineWidth)
-
-                canvas.drawText(timestamp, 20f, 50f, paint)
-
-                val sessionNameBounds = Rect()
-                paint.getTextBounds(sessionName, 0, sessionName.length, sessionNameBounds)
-                val sessionNameX = mutableBitmap.width - sessionNameBounds.width() - 20f
-                canvas.drawText(sessionName, sessionNameX, 50f, paint)
-
-                val lineSpacing = 6f
-                val totalLocationHeight = locationLines.size * (paint.textSize + lineSpacing)
-                var currentY = mutableBitmap.height - totalLocationHeight - 15f
-
-                locationLines.forEach { line ->
-                    val lineBounds = Rect()
-                    paint.getTextBounds(line, 0, line.length, lineBounds)
-                    val lineX = (mutableBitmap.width - lineBounds.width()) / 2f
-                    canvas.drawText(line, lineX, currentY, paint)
-                    currentY += paint.textSize + lineSpacing
-                }
-            }
-
-            val overlayFile = File(
-                originalFile.parent,
-                "IMG_${System.currentTimeMillis()}_watermarked.jpg"
-            )
-
-            FileOutputStream(overlayFile).use { out ->
-                mutableBitmap.compress(Bitmap.CompressFormat.JPEG, 95, out)
-            }
-
-            try {
-                val srcExif = ExifInterface(originalFile.absolutePath)
-                val dstExif = ExifInterface(overlayFile.absolutePath)
-
-                srcExif.latLong?.let { ll ->
-                    dstExif.setLatLong(ll[0], ll[1])
-                }
-
-                val dateTags = arrayOf(
-                    ExifInterface.TAG_DATETIME,
-                    ExifInterface.TAG_DATETIME_ORIGINAL,
-                    ExifInterface.TAG_DATETIME_DIGITIZED
-                )
-                dateTags.forEach { tag ->
-                    srcExif.getAttribute(tag)?.let { dstExif.setAttribute(tag, it) }
-                }
-
-                dstExif.saveAttributes()
-            } catch (ex: Exception) {
-                Log.w(TAG, "Failed to copy EXIF", ex)
-            }
-
-            if (originalFile != overlayFile && originalFile.exists()) {
-                originalFile.delete()
-            }
-
-            Log.d(TAG, "Overlay added: ${overlayFile.name}")
-            overlayFile
-        } catch (e: Exception) {
-            Log.e(TAG, "Error adding overlay", e)
-            originalFile
-        }
-    }
-
-    private fun wrapText(text: String, paint: Paint, maxWidth: Float): List<String> {
-        val words = text.split(" ")
-        val lines = mutableListOf<String>()
-        var currentLine = ""
-
-        for (word in words) {
-            val testLine = if (currentLine.isEmpty()) word else "$currentLine $word"
-            val testWidth = paint.measureText(testLine)
-
-            if (testWidth <= maxWidth) {
-                currentLine = testLine
-            } else {
-                if (currentLine.isNotEmpty()) {
-                    lines.add(currentLine)
-                    currentLine = word
-                } else {
-                    lines.add(word)
-                }
-            }
-        }
-
-        if (currentLine.isNotEmpty()) {
-            lines.add(currentLine)
-        }
-
-        return lines.ifEmpty { listOf(text) }
-    }
-
-    fun getSessionFolderPath(sessionName: String): File {
-        val picturesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
-        return File(picturesDir, "$APP_FOLDER_NAME${File.separator}$sessionName")
-    }
-
-    fun getSessionMediaFiles(sessionName: String): List<File> {
-        return try {
-            val sessionDir = getSessionFolderPath(sessionName)
-            if (sessionDir.exists() && sessionDir.isDirectory) {
-                val files = sessionDir.listFiles { file ->
-                    file.extension.lowercase() in listOf("jpg", "jpeg", "png", "mp4", "avi", "mov")
-                }?.sortedByDescending { it.lastModified() } ?: emptyList()
-
-                Log.d(TAG, "Found ${files.size} media files in session: $sessionName")
-                files
-            } else {
-                Log.w(TAG, "Session directory doesn't exist: ${sessionDir.absolutePath}")
-                emptyList()
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error getting session media files", e)
-            emptyList()
-        }
-    }
-
     private fun getDisplayRotation(): Int {
         return try {
             if (android.os.Build.VERSION.SDK_INT >= 30) {
@@ -597,7 +566,6 @@ class CameraController(
             mediaActionSound?.release()
             mediaActionSound = null
             cameraExecutor.shutdown()
-            Log.d(TAG, "CameraController shutdown")
         } catch (e: Exception) {
             Log.w(TAG, "Shutdown error", e)
         }
