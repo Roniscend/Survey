@@ -1,0 +1,12 @@
+/build
+*.db
+*.db-shm
+*.db-wal    
+google-services.json
+.idea/appInsightsSettings.xml
+.idea/file_patterns.xml
+/idea
+/idea/firebender
+/app/
+appDataDir/
+app/src/main/res/xml/
